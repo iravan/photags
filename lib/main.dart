@@ -888,6 +888,7 @@ class _FullImageScreen extends StatefulWidget {
 
 class _FullImageScreenState extends State<_FullImageScreen> {
   List<String> _tags = [];
+  Set<String> _allExistingTags = {};
   String? _photoKey;
   bool _isLoadingKey = false;
   final TextEditingController _tagController = TextEditingController();
@@ -896,6 +897,7 @@ class _FullImageScreenState extends State<_FullImageScreen> {
   void initState() {
     super.initState();
     _loadTags();
+    _loadAllExistingTags();
   }
 
   @override
@@ -933,6 +935,13 @@ class _FullImageScreenState extends State<_FullImageScreen> {
     }
   }
 
+  Future<void> _loadAllExistingTags() async {
+    final tags = await TagService.getAllUniqueTags();
+    setState(() {
+      _allExistingTags = tags;
+    });
+  }
+
   Future<void> _addTag(String tag) async {
     if (tag.trim().isEmpty || _photoKey == null) return;
     final trimmedTag = tag.trim();
@@ -941,6 +950,7 @@ class _FullImageScreenState extends State<_FullImageScreen> {
     await TagService.addTag(_photoKey!, trimmedTag);
     setState(() {
       _tags = List.from(_tags)..add(trimmedTag);
+      _allExistingTags.add(trimmedTag); // Add to existing tags if new
     });
     _tagController.clear();
 
@@ -949,6 +959,16 @@ class _FullImageScreenState extends State<_FullImageScreen> {
     if (state != null) {
       await state._loadAllTags();
       await state._applyFilters();
+    }
+  }
+
+  Future<void> _toggleTagFromExisting(String tag) async {
+    if (_tags.contains(tag)) {
+      // Remove tag if already applied
+      await _removeTag(tag);
+    } else {
+      // Add tag if not applied
+      await _addTag(tag);
     }
   }
 
@@ -1129,10 +1149,51 @@ class _FullImageScreenState extends State<_FullImageScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // Existing tags section
+                if (_allExistingTags.isNotEmpty) ...[
+                  const Text(
+                    'All Tags:',
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: _allExistingTags.map((tag) {
+                      final isApplied = _tags.contains(tag);
+                      return ActionChip(
+                        label: Text(tag),
+                        backgroundColor: isApplied
+                            ? Colors.blue[700]
+                            : Colors.grey[800],
+                        labelStyle: TextStyle(
+                          color: isApplied ? Colors.white : Colors.white70,
+                          fontWeight: isApplied
+                              ? FontWeight.bold
+                              : FontWeight.normal,
+                        ),
+                        onPressed: () => _toggleTagFromExisting(tag),
+                        avatar: isApplied
+                            ? const Icon(
+                                Icons.check,
+                                size: 16,
+                                color: Colors.white,
+                              )
+                            : null,
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+                // Current photo tags section
                 Row(
                   children: [
                     const Text(
-                      'Tags:',
+                      'Photo Tags:',
                       style: TextStyle(
                         color: Colors.white,
                         fontSize: 16,
@@ -1146,7 +1207,7 @@ class _FullImageScreenState extends State<_FullImageScreen> {
                         color: Colors.white,
                       ),
                       onPressed: _showAddTagDialog,
-                      tooltip: 'Add tag',
+                      tooltip: 'Add new tag',
                     ),
                   ],
                 ),
@@ -1169,7 +1230,7 @@ class _FullImageScreenState extends State<_FullImageScreen> {
                   const Padding(
                     padding: EdgeInsets.all(8.0),
                     child: Text(
-                      'No tags',
+                      'No tags applied',
                       style: TextStyle(color: Colors.grey),
                     ),
                   )

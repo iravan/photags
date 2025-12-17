@@ -51,7 +51,7 @@ class TagService {
     return allTags[photoKey] ?? [];
   }
 
-  /// Get photo keys that have all the specified tags
+  /// Get photo keys that have any of the specified tags (OR logic)
   static Future<Set<String>> getPhotosByTags(Set<String> tags) async {
     if (tags.isEmpty) {
       return {};
@@ -72,37 +72,29 @@ class TagService {
       if (rebuiltIndex.isEmpty) {
         return {};
       }
-      // Use rebuilt index
-      final firstTagPhotos = Set<String>.from(rebuiltIndex[tags.first] ?? []);
-      debugPrint(
-        'TagService: Photos with "${tags.first}": ${firstTagPhotos.length}',
-      );
 
-      Set<String> result = firstTagPhotos;
-      for (final tag in tags.skip(1)) {
+      // Union all photos that have any of the selected tags (OR logic)
+      Set<String> result = {};
+      for (final tag in tags) {
         final photosWithTag = Set<String>.from(rebuiltIndex[tag] ?? []);
         debugPrint('TagService: Photos with "$tag": ${photosWithTag.length}');
-        result = result.intersection(photosWithTag);
+        result = result.union(photosWithTag);
       }
-      debugPrint('TagService: Final result: ${result.length} photos');
+      debugPrint(
+        'TagService: Final result: ${result.length} photos (OR logic)',
+      );
       return result;
     }
 
-    // Start with photos that have the first tag
-    final firstTagPhotos = tagIndex[tags.first] ?? [];
-    debugPrint(
-      'TagService: Photos with "${tags.first}": ${firstTagPhotos.length}',
-    );
-    Set<String> result = Set<String>.from(firstTagPhotos);
-
-    // Intersect with photos that have each subsequent tag
-    for (final tag in tags.skip(1)) {
+    // Union all photos that have any of the selected tags (OR logic)
+    Set<String> result = {};
+    for (final tag in tags) {
       final photosWithTag = tagIndex[tag] ?? [];
       debugPrint('TagService: Photos with "$tag": ${photosWithTag.length}');
-      result = result.intersection(Set<String>.from(photosWithTag));
+      result = result.union(Set<String>.from(photosWithTag));
     }
 
-    debugPrint('TagService: Final result: ${result.length} photos');
+    debugPrint('TagService: Final result: ${result.length} photos (OR logic)');
     return result;
   }
 

@@ -1,8 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:photo_manager/photo_manager.dart';
+import 'package:open_file/open_file.dart';
+import 'package:file_picker/file_picker.dart';
 import 'dart:io';
+import 'dart:convert';
 import 'dart:typed_data';
 import 'tag_service.dart';
+import 'constants/colors.dart';
+import 'constants/strings.dart';
+import 'constants/dimensions.dart';
+import 'constants/typography.dart';
+import 'dialog_helpers.dart';
 
 void main() {
   runApp(const MyApp());
@@ -14,10 +22,24 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Phoorg - Photo Gallery',
+      title: AppStrings.appTitle,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        colorScheme:
+            ColorScheme.fromSeed(
+              seedColor: AppColors.primary,
+              brightness: Brightness.dark,
+            ).copyWith(
+              primary: AppColors.primary,
+              secondary: AppColors.secondary,
+              surface: AppColors.primary,
+              background: AppColors.primary,
+            ),
         useMaterial3: true,
+        scaffoldBackgroundColor: AppColors.scaffoldBackground,
+        appBarTheme: const AppBarTheme(
+          backgroundColor: AppColors.primary,
+          foregroundColor: AppColors.textWhite,
+        ),
       ),
       home: const PhotoGalleryScreen(),
     );
@@ -48,6 +70,17 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
   Set<String> _selectedFilterTags = {};
   Map<String, String> _photoKeyCache =
       {}; // Cache photo keys (width_height_createTime)
+
+  // Scroll position tracking
+  final ScrollController _scrollController = ScrollController();
+  double _savedScrollPosition = 0.0;
+
+  // Tag editing controller
+  final TextEditingController _editTagController = TextEditingController();
+
+  // Drag-to-select state
+  bool _isDraggingToSelect = false;
+  Set<String> _photosBeingDraggedOver = {};
 
   @override
   void initState() {
@@ -85,6 +118,8 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
   @override
   void dispose() {
     _selectedPhotoIdsNotifier.dispose();
+    _scrollController.dispose();
+    _editTagController.dispose();
     super.dispose();
   }
 
@@ -218,6 +253,338 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
     _applyFilters();
   }
 
+  Future<void> _showEditTagDialog(String oldTag) async {
+    _editTagController.text = oldTag;
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.primary,
+        title: const Text(
+          AppStrings.editTag,
+          style: TextStyle(color: AppColors.textWhite),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              autofocus: true,
+              controller: _editTagController,
+              style: const TextStyle(color: AppColors.textWhite),
+              cursorColor: AppColors.textWhite,
+              decoration: DialogHelpers.buildTextFieldDecoration(
+                hintText: AppStrings.enterNewTagName,
+              ),
+              onSubmitted: (value) {
+                if (value.trim().isNotEmpty && value.trim() != oldTag) {
+                  Navigator.of(
+                    context,
+                  ).pop({'action': 'edit', 'tag': value.trim()});
+                }
+              },
+            ),
+            const SizedBox(height: AppDimensions.spacingM),
+            DialogHelpers.buildDeleteTagButton(
+              context,
+              () => Navigator.of(context).pop({'action': 'delete'}),
+            ),
+          ],
+        ),
+        actions: [
+          DialogHelpers.buildCancelButton(context),
+          TextButton(
+            onPressed: () {
+              final tag = _editTagController.text.trim();
+              if (tag.isNotEmpty && tag != oldTag) {
+                Navigator.of(context).pop({'action': 'edit', 'tag': tag});
+              }
+            },
+            style: TextButton.styleFrom(foregroundColor: AppColors.secondary),
+            child: const Text(AppStrings.edit),
+          ),
+        ],
+      ),
+    );
+
+    if (result != null) {
+      if (result['action'] == 'delete') {
+        // Delete tag from all photos
+        await TagService.deleteTag(oldTag);
+
+        // Update local state
+        setState(() {
+          _selectedFilterTags.remove(oldTag);
+          _allTags.remove(oldTag);
+        });
+
+        // Refresh filters and tags
+        await _loadAllTags();
+        await _applyFilters();
+      } else if (result['action'] == 'edit') {
+        final newTag = result['tag'] as String;
+        if (newTag.trim().isNotEmpty && newTag != oldTag) {
+          await TagService.renameTag(oldTag, newTag);
+
+          // Update local state
+          setState(() {
+            if (_selectedFilterTags.contains(oldTag)) {
+              _selectedFilterTags.remove(oldTag);
+              _selectedFilterTags.add(newTag);
+            }
+            _allTags.remove(oldTag);
+            _allTags.add(newTag);
+          });
+
+          // Refresh filters and tags
+          await _loadAllTags();
+          await _applyFilters();
+        }
+      }
+    }
+    _editTagController.clear();
+  }
+
+  void _showHelpDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.primary,
+        title: const Text(
+          AppStrings.helpTitle,
+          style: TextStyle(color: AppColors.textWhite),
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                AppStrings.helpViewingPhotos,
+                style: TextStyle(
+                  color: AppColors.textWhite,
+                  fontWeight: AppTypography.fontWeightBold,
+                  fontSize: AppTypography.fontSizeL,
+                ),
+              ),
+              const SizedBox(height: AppDimensions.spacingXS),
+              Text(
+                AppStrings.helpViewingPhotosDesc,
+                style: const TextStyle(
+                  color: AppColors.textWhite70,
+                  fontSize: AppTypography.fontSizeM,
+                ),
+              ),
+              const SizedBox(height: AppDimensions.spacingL),
+              const Text(
+                AppStrings.helpSelectingPhotos,
+                style: TextStyle(
+                  color: AppColors.textWhite,
+                  fontWeight: AppTypography.fontWeightBold,
+                  fontSize: AppTypography.fontSizeL,
+                ),
+              ),
+              const SizedBox(height: AppDimensions.spacingXS),
+              Text(
+                AppStrings.helpSelectingPhotosDesc,
+                style: const TextStyle(
+                  color: AppColors.textWhite70,
+                  fontSize: AppTypography.fontSizeM,
+                ),
+              ),
+              const SizedBox(height: AppDimensions.spacingL),
+              const Text(
+                AppStrings.helpTagging,
+                style: TextStyle(
+                  color: AppColors.textWhite,
+                  fontWeight: AppTypography.fontWeightBold,
+                  fontSize: AppTypography.fontSizeL,
+                ),
+              ),
+              const SizedBox(height: AppDimensions.spacingXS),
+              Text(
+                AppStrings.helpTaggingDesc,
+                style: const TextStyle(
+                  color: AppColors.textWhite70,
+                  fontSize: AppTypography.fontSizeM,
+                ),
+              ),
+              const SizedBox(height: AppDimensions.spacingL),
+              const Text(
+                AppStrings.helpFiltering,
+                style: TextStyle(
+                  color: AppColors.textWhite,
+                  fontWeight: AppTypography.fontWeightBold,
+                  fontSize: AppTypography.fontSizeL,
+                ),
+              ),
+              const SizedBox(height: AppDimensions.spacingXS),
+              Text(
+                AppStrings.helpFilteringDesc,
+                style: const TextStyle(
+                  color: AppColors.textWhite70,
+                  fontSize: AppTypography.fontSizeM,
+                ),
+              ),
+              const SizedBox(height: AppDimensions.spacingL),
+              const Text(
+                AppStrings.helpOtherFeatures,
+                style: TextStyle(
+                  color: AppColors.textWhite,
+                  fontWeight: AppTypography.fontWeightBold,
+                  fontSize: AppTypography.fontSizeL,
+                ),
+              ),
+              const SizedBox(height: AppDimensions.spacingXS),
+              Text(
+                AppStrings.helpOtherFeaturesDesc,
+                style: const TextStyle(
+                  color: AppColors.textWhite70,
+                  fontSize: AppTypography.fontSizeM,
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            style: TextButton.styleFrom(foregroundColor: AppColors.secondary),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _exportTags() async {
+    try {
+      // Generate YAML content
+      final yamlContent = await TagService.exportTagsToYamlString();
+
+      // Generate default filename with timestamp
+      final timestamp = DateTime.now()
+          .toIso8601String()
+          .replaceAll(':', '-')
+          .split('.')[0];
+      final defaultFileName = 'photag_tags_$timestamp.yaml';
+
+      // Convert string to bytes for Android/iOS
+      final bytes = utf8.encode(yamlContent);
+
+      // Let user choose save location
+      final result = await FilePicker.platform.saveFile(
+        dialogTitle: AppStrings.exportTags,
+        fileName: defaultFileName,
+        type: FileType.custom,
+        allowedExtensions: ['yaml', 'yml'],
+        bytes: bytes,
+      );
+
+      if (result != null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                '${AppStrings.exportTagsSuccess}\n$result',
+                style: const TextStyle(color: AppColors.snackbarText),
+              ),
+              backgroundColor: AppColors.snackbarBackground,
+              duration: const Duration(seconds: 4),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '${AppStrings.exportTagsError}$e',
+              style: const TextStyle(color: AppColors.snackbarText),
+            ),
+            backgroundColor: AppColors.snackbarBackground,
+          ),
+        );
+      }
+      debugPrint('Error exporting tags: $e');
+    }
+  }
+
+  Future<void> _importTags() async {
+    // Show confirmation dialog
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.primary,
+        title: const Text(
+          AppStrings.importTagsConfirmTitle,
+          style: TextStyle(color: AppColors.textWhite),
+        ),
+        content: const Text(
+          AppStrings.importTagsConfirm,
+          style: TextStyle(color: AppColors.textWhite),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            style: TextButton.styleFrom(
+              foregroundColor: AppColors.whiteWithOpacity(0.7),
+            ),
+            child: const Text(AppStrings.cancel),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            style: TextButton.styleFrom(foregroundColor: AppColors.secondary),
+            child: const Text(AppStrings.importTags),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    try {
+      // Pick YAML file
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['yaml', 'yml'],
+      );
+
+      if (result != null && result.files.single.path != null) {
+        final filePath = result.files.single.path!;
+        await TagService.importTagsFromYaml(filePath);
+
+        // Refresh tags and filters
+        await _loadAllTags();
+        await _applyFilters();
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                AppStrings.importTagsSuccess,
+                style: const TextStyle(color: AppColors.snackbarText),
+              ),
+              backgroundColor: AppColors.snackbarBackground,
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '${AppStrings.importTagsError}$e',
+              style: const TextStyle(color: AppColors.snackbarText),
+            ),
+            backgroundColor: AppColors.snackbarBackground,
+          ),
+        );
+      }
+      debugPrint('Error importing tags: $e');
+    }
+  }
+
   Future<void> _requestPermissionAndLoadPhotos() async {
     try {
       // Request permission
@@ -232,8 +599,7 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
         setState(() {
           _hasPermission = false;
           _isLoading = false;
-          _errorMessage =
-              'Permission denied. Please grant photo access permission in settings.';
+          _errorMessage = AppStrings.permissionDenied;
         });
         PhotoManager.openSetting();
       }
@@ -260,7 +626,7 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
       if (albums.isEmpty) {
         setState(() {
           _isLoading = false;
-          _errorMessage = 'No photos found on device.';
+          _errorMessage = AppStrings.noPhotosFound;
         });
         return;
       }
@@ -286,10 +652,20 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
       // Load tags and apply filters
       await _loadAllTags();
       await _applyFilters();
+
+      // Restore scroll position after loading if available
+      if (_savedScrollPosition > 0) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_scrollController.hasClients && _savedScrollPosition > 0) {
+            _scrollController.jumpTo(_savedScrollPosition);
+            _savedScrollPosition = 0.0;
+          }
+        });
+      }
     } catch (e) {
       setState(() {
         _isLoading = false;
-        _errorMessage = 'Error loading photos: $e';
+        _errorMessage = '${AppStrings.errorLoadingPhotos}$e';
       });
     }
   }
@@ -325,32 +701,74 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
     }
   }
 
+  void _handleDragOverPhoto(Offset localPosition, List<AssetEntity> photos) {
+    if (!_isSelectionMode || photos.isEmpty) return;
+
+    // Account for padding
+    final padding = AppDimensions.gridSpacing;
+    final gridSpacing = AppDimensions.gridSpacing;
+
+    // Calculate grid cell size
+    final screenWidth = MediaQuery.of(context).size.width;
+    final availableWidth = screenWidth - (padding * 2);
+    final cellWidth =
+        (availableWidth -
+            gridSpacing * (AppDimensions.gridCrossAxisCount - 1)) /
+        AppDimensions.gridCrossAxisCount;
+    final cellHeight = cellWidth; // Square cells
+
+    // Adjust position for padding and scroll offset
+    final adjustedX = localPosition.dx - padding;
+    final adjustedY = localPosition.dy - padding + _scrollController.offset;
+
+    // Calculate which grid cell the position is in
+    final column = (adjustedX / (cellWidth + gridSpacing)).floor();
+    final row = (adjustedY / (cellHeight + gridSpacing)).floor();
+    final index = row * AppDimensions.gridCrossAxisCount + column;
+
+    // Check if index is valid and photo hasn't been processed yet
+    if (index >= 0 && index < photos.length) {
+      final photoId = photos[index].id;
+      if (!_photosBeingDraggedOver.contains(photoId)) {
+        _photosBeingDraggedOver.add(photoId);
+        // Add to selection if not already selected
+        final currentSelection = Set<String>.from(_selectedPhotoIds);
+        if (!currentSelection.contains(photoId)) {
+          currentSelection.add(photoId);
+          _selectedPhotoIdsNotifier.value = currentSelection;
+        }
+      }
+    }
+  }
+
   Future<void> _deleteSelectedPhotos() async {
     if (_selectedPhotoIds.isEmpty) return;
 
-    // Show confirmation dialog
-    final bool? confirm = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete Photos'),
-        content: Text(
-          'Are you sure you want to delete ${_selectedPhotoIds.length} photo(s)? This action cannot be undone.',
+    // Skip confirmation dialog on iOS since system already prompts
+    if (!Platform.isIOS) {
+      final bool? confirm = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text(AppStrings.deletePhotos),
+          content: Text(
+            AppStrings.deletePhotosConfirmWithCount(_selectedPhotoIds.length),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              child: const Text('Delete'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
+      );
 
-    if (confirm != true) return;
+      if (confirm != true) return;
+    }
 
     try {
       // Get the selected assets
@@ -378,11 +796,24 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
       await _applyFilters();
       await _loadAllTags();
 
+      // Restore scroll position after deletion
+      if (_savedScrollPosition > 0) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_scrollController.hasClients && _savedScrollPosition > 0) {
+            _scrollController.jumpTo(_savedScrollPosition);
+            _savedScrollPosition = 0.0;
+          }
+        });
+      }
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('${deletedIds.length} photo(s) deleted successfully'),
-            backgroundColor: Colors.green,
+            content: Text(
+              AppStrings.photosDeletedSuccessfullyWithCount(deletedIds.length),
+              style: const TextStyle(color: AppColors.snackbarText),
+            ),
+            backgroundColor: AppColors.snackbarBackground,
           ),
         );
       }
@@ -390,8 +821,11 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Error deleting photos: $e'),
-            backgroundColor: Colors.red,
+            content: Text(
+              '${AppStrings.errorDeletingPhotos}$e',
+              style: const TextStyle(color: AppColors.snackbarText),
+            ),
+            backgroundColor: AppColors.snackbarBackground,
           ),
         );
       }
@@ -402,7 +836,7 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        backgroundColor: AppColors.primary,
         title: ValueListenableBuilder<Set<String>>(
           valueListenable: _selectedPhotoIdsNotifier,
           builder: (context, selectedIds, _) {
@@ -446,6 +880,74 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
               onPressed: _hasPermission ? _refreshPhotos : null,
               tooltip: 'Refresh',
             ),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.menu),
+            tooltip: AppStrings.help,
+            onSelected: (value) {
+              if (value == 'help') {
+                _showHelpDialog();
+              } else if (value == 'export') {
+                _exportTags();
+              } else if (value == 'import') {
+                _importTags();
+              }
+            },
+            itemBuilder: (context) {
+              final items = <PopupMenuEntry<String>>[];
+
+              // Only show export if there are tags
+              if (_allTags.isNotEmpty) {
+                items.add(
+                  const PopupMenuItem<String>(
+                    value: 'export',
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.file_download,
+                          size: AppDimensions.iconSizeM,
+                        ),
+                        SizedBox(width: AppDimensions.spacingS),
+                        Text(AppStrings.exportTags),
+                      ],
+                    ),
+                  ),
+                );
+              }
+
+              items.add(
+                const PopupMenuItem<String>(
+                  value: 'import',
+                  child: Row(
+                    children: [
+                      Icon(Icons.file_upload, size: AppDimensions.iconSizeM),
+                      SizedBox(width: AppDimensions.spacingS),
+                      Text(AppStrings.importTags),
+                    ],
+                  ),
+                ),
+              );
+
+              // Only add divider if export was shown
+              if (_allTags.isNotEmpty) {
+                items.add(const PopupMenuDivider());
+              }
+
+              items.add(
+                const PopupMenuItem<String>(
+                  value: 'help',
+                  child: Row(
+                    children: [
+                      Icon(Icons.help_outline, size: AppDimensions.iconSizeM),
+                      SizedBox(width: AppDimensions.spacingS),
+                      Text(AppStrings.help),
+                    ],
+                  ),
+                ),
+              );
+
+              return items;
+            },
+          ),
         ],
       ),
       body: _buildBody(),
@@ -459,7 +961,7 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             CircularProgressIndicator(),
-            SizedBox(height: 16),
+            SizedBox(height: AppDimensions.spacingL),
             Text('Loading photos...'),
           ],
         ),
@@ -469,19 +971,19 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
     if (!_hasPermission) {
       return Center(
         child: Padding(
-          padding: const EdgeInsets.all(24.0),
+          padding: const EdgeInsets.all(AppDimensions.paddingXL),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               const Icon(
                 Icons.photo_library_outlined,
-                size: 64,
-                color: Colors.grey,
+                size: AppDimensions.iconSizeXXL,
+                color: AppColors.textGrey,
               ),
               const SizedBox(height: 16),
               const Text(
                 'Photo Access Permission Required',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                style: AppTypography.headingLarge,
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 8),
@@ -490,7 +992,7 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
                 style: const TextStyle(color: Colors.grey),
                 textAlign: TextAlign.center,
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: AppDimensions.spacingXL),
               ElevatedButton.icon(
                 onPressed: _requestPermissionAndLoadPhotos,
                 icon: const Icon(Icons.settings),
@@ -505,7 +1007,7 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
     if (_errorMessage.isNotEmpty && _photos.isEmpty) {
       return Center(
         child: Padding(
-          padding: const EdgeInsets.all(24.0),
+          padding: const EdgeInsets.all(AppDimensions.paddingXL),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -516,7 +1018,7 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
                 style: const TextStyle(color: Colors.grey),
                 textAlign: TextAlign.center,
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: AppDimensions.spacingXL),
               ElevatedButton.icon(
                 onPressed: _refreshPhotos,
                 icon: const Icon(Icons.refresh),
@@ -529,15 +1031,24 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
     }
 
     if (_photos.isEmpty) {
-      return const Center(
+      return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.photo_library_outlined, size: 64, color: Colors.grey),
-            SizedBox(height: 16),
+            Icon(
+              Icons.photo_library_outlined,
+              size: AppDimensions.iconSizeXXL,
+              color: AppColors.textGrey,
+            ),
+            SizedBox(height: AppDimensions.spacingL),
             Text(
-              'No photos found',
-              style: TextStyle(fontSize: 18, color: Colors.grey),
+              AppStrings.noPhotosFound,
+              style: AppTypography.withColor(
+                AppTypography.bodyLarge.copyWith(
+                  fontSize: AppTypography.fontSizeXXL,
+                ),
+                AppColors.textGrey,
+              ),
             ),
           ],
         ),
@@ -550,12 +1061,15 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
         if (_allTags.isNotEmpty)
           Container(
             width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+            padding: const EdgeInsets.symmetric(
+              horizontal: AppDimensions.spacingS,
+              vertical: AppDimensions.spacingS,
+            ),
             decoration: BoxDecoration(
               color: Theme.of(context).colorScheme.surface,
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withOpacity(0.05),
+                  color: Colors.black.withValues(alpha: 0.05),
                   blurRadius: 4,
                   offset: const Offset(0, 2),
                 ),
@@ -564,61 +1078,86 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    const Text(
-                      'Filter by tags:',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    const Spacer(),
-                    if (_selectedFilterTags.isNotEmpty)
-                      TextButton.icon(
-                        onPressed: _clearFilters,
-                        icon: const Icon(Icons.clear, size: 16),
-                        label: const Text('Clear'),
-                        style: TextButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                        ),
-                      ),
-                  ],
+                const Text(
+                  AppStrings.filterByTags,
+                  style: AppTypography.headingSmall,
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: AppDimensions.spacingS),
                 Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
+                  spacing: 4,
+                  runSpacing: 4,
                   children: _allTags.map((tag) {
                     final isSelected = _selectedFilterTags.contains(tag);
-                    return FilterChip(
-                      label: Text(tag),
-                      selected: isSelected,
-                      onSelected: (selected) => _toggleFilterTag(tag),
-                      selectedColor: Theme.of(
-                        context,
-                      ).colorScheme.primaryContainer,
-                      checkmarkColor: Theme.of(
-                        context,
-                      ).colorScheme.onPrimaryContainer,
-                      labelStyle: TextStyle(
-                        color: isSelected
-                            ? Theme.of(context).colorScheme.onPrimaryContainer
-                            : null,
+                    return GestureDetector(
+                      onLongPress: () => _showEditTagDialog(tag),
+                      child: ActionChip(
+                        label: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.label_outline,
+                              size: 14,
+                              color: isSelected
+                                  ? const Color(0xFF191921)
+                                  : const Color(
+                                      0xffacafbf,
+                                    ).withValues(alpha: 0.5),
+                            ),
+                            const SizedBox(width: AppDimensions.tagIconSpacing),
+                            Text(tag),
+                          ],
+                        ),
+                        backgroundColor: isSelected
+                            ? Colors
+                                  .white // Bootstrap badge: white background
+                            : Colors.transparent, // Outlined style for inactive
+                        side: BorderSide(
+                          color: isSelected
+                              ? Colors
+                                    .white // No visible border (matches bg)
+                              : const Color(
+                                  0xffacafbf,
+                                ).withValues(alpha: 0.5), // Outlined border
+                          width: isSelected ? 0 : 1,
+                        ),
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(
+                            AppDimensions.tagBorderRadius,
+                          ),
+                        ),
+                        labelStyle: TextStyle(
+                          color: isSelected
+                              ? const Color(
+                                  0xFF191921,
+                                ) // Primary color (dark) - fully opaque
+                              : const Color(0xffacafbf).withValues(
+                                  alpha: 0.5,
+                                ), // Match border color for inactive
+                          fontWeight:
+                              FontWeight.w500, // Bootstrap badge: medium weight
+                          fontSize: AppTypography.fontSizeS,
+                        ),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: AppDimensions.tagHorizontalPadding,
+                          vertical: AppDimensions.tagVerticalPadding,
+                        ),
+                        visualDensity: VisualDensity.compact,
+                        onPressed: () => _toggleFilterTag(tag),
                       ),
                     );
                   }).toList(),
                 ),
                 if (_selectedFilterTags.isNotEmpty)
                   Padding(
-                    padding: const EdgeInsets.only(top: 8),
+                    padding: const EdgeInsets.only(top: AppDimensions.spacingS),
                     child: Text(
                       'Showing ${_filteredPhotos.length} of ${_photos.length} photos',
                       style: TextStyle(
-                        fontSize: 12,
+                        fontSize: AppTypography.fontSizeS,
                         color: Theme.of(
                           context,
-                        ).colorScheme.onSurface.withOpacity(0.6),
+                        ).colorScheme.onSurface.withValues(alpha: 0.6),
                       ),
                     ),
                   ),
@@ -641,7 +1180,7 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
                         'No photos match the selected tags',
                         style: TextStyle(fontSize: 18, color: Colors.grey[600]),
                       ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: AppDimensions.spacingS),
                       TextButton(
                         onPressed: _clearFilters,
                         child: const Text('Clear filters'),
@@ -658,39 +1197,82 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
                     debugPrint(
                       'GridView: useFiltered=$useFiltered, showing ${photosToShow.length} photos',
                     );
-                    return GridView.builder(
-                      padding: const EdgeInsets.all(4),
-                      gridDelegate:
-                          const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 3,
-                            crossAxisSpacing: 4,
-                            mainAxisSpacing: 4,
+
+                    // Restore scroll position if available (will be handled after navigation returns)
+
+                    return Container(
+                      color: Colors.white,
+                      child: GestureDetector(
+                        onPanStart: _isSelectionMode
+                            ? (details) {
+                                _isDraggingToSelect = true;
+                                _photosBeingDraggedOver.clear();
+                                _handleDragOverPhoto(
+                                  details.localPosition,
+                                  photosToShow,
+                                );
+                              }
+                            : null,
+                        onPanUpdate: _isSelectionMode
+                            ? (details) {
+                                _handleDragOverPhoto(
+                                  details.localPosition,
+                                  photosToShow,
+                                );
+                              }
+                            : null,
+                        onPanEnd: _isSelectionMode
+                            ? (_) {
+                                _isDraggingToSelect = false;
+                                _photosBeingDraggedOver.clear();
+                              }
+                            : null,
+                        onPanCancel: _isSelectionMode
+                            ? () {
+                                _isDraggingToSelect = false;
+                                _photosBeingDraggedOver.clear();
+                              }
+                            : null,
+                        child: GridView.builder(
+                          controller: _scrollController,
+                          padding: const EdgeInsets.all(
+                            AppDimensions.gridSpacing,
                           ),
-                      itemCount: photosToShow.length,
-                      itemBuilder: (context, index) {
-                        final asset = photosToShow[index];
-                        return RepaintBoundary(
-                          key: ValueKey(asset.id),
-                          child: _PhotoThumbnail(
-                            asset: asset,
-                            isSelectionMode: _isSelectionMode,
-                            selectedPhotoIdsNotifier: _selectedPhotoIdsNotifier,
-                            onTap: _isSelectionMode
-                                ? () => _togglePhotoSelection(asset.id)
-                                : null,
-                            onLongPress: !_isSelectionMode
-                                ? () {
-                                    setState(() {
-                                      _isSelectionMode = true;
-                                      _selectedPhotoIdsNotifier.value = {
-                                        asset.id,
-                                      };
-                                    });
-                                  }
-                                : null,
-                          ),
-                        );
-                      },
+                          gridDelegate:
+                              const SliverGridDelegateWithFixedCrossAxisCount(
+                                crossAxisCount:
+                                    AppDimensions.gridCrossAxisCount,
+                                crossAxisSpacing: AppDimensions.gridSpacing,
+                                mainAxisSpacing: AppDimensions.gridSpacing,
+                              ),
+                          itemCount: photosToShow.length,
+                          itemBuilder: (context, index) {
+                            final asset = photosToShow[index];
+                            return RepaintBoundary(
+                              key: ValueKey(asset.id),
+                              child: _PhotoThumbnail(
+                                asset: asset,
+                                isSelectionMode: _isSelectionMode,
+                                selectedPhotoIdsNotifier:
+                                    _selectedPhotoIdsNotifier,
+                                onTap: _isSelectionMode && !_isDraggingToSelect
+                                    ? () => _togglePhotoSelection(asset.id)
+                                    : null,
+                                onLongPress: !_isSelectionMode
+                                    ? () {
+                                        setState(() {
+                                          _isSelectionMode = true;
+                                          _selectedPhotoIdsNotifier.value = {
+                                            asset.id,
+                                          };
+                                        });
+                                      }
+                                    : null,
+                              ),
+                            );
+                          },
+                        ),
+                      ),
                     );
                   },
                 ),
@@ -701,14 +1283,14 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
             if (_isSelectionMode && selectedIds.isNotEmpty) {
               return Container(
                 padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 8,
+                  horizontal: AppDimensions.spacingL,
+                  vertical: AppDimensions.spacingS,
                 ),
                 decoration: BoxDecoration(
                   color: Theme.of(context).colorScheme.surface,
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withOpacity(0.1),
+                      color: Colors.black.withValues(alpha: 0.1),
                       blurRadius: 4,
                       offset: const Offset(0, -2),
                     ),
@@ -719,13 +1301,13 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Text(
-                        '${selectedIds.length} photo(s) selected',
+                        '${selectedIds.length} ${AppStrings.photosSelected}',
                         style: Theme.of(context).textTheme.titleMedium,
                       ),
                       ElevatedButton.icon(
                         onPressed: _deleteSelectedPhotos,
                         icon: const Icon(Icons.delete),
-                        label: const Text('Delete'),
+                        label: const Text(AppStrings.delete),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.red,
                           foregroundColor: Colors.white,
@@ -802,25 +1384,17 @@ class _PhotoThumbnailState extends State<_PhotoThumbnail> {
       child: Stack(
         children: [
           Container(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(4),
-              color: Colors.grey[300],
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: _isLoadingThumbnail
-                  ? const Center(
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : _thumbnailData != null
-                  ? Image.memory(
-                      _thumbnailData!,
-                      fit: BoxFit.cover,
-                      width: double.infinity,
-                      height: double.infinity,
-                    )
-                  : const Icon(Icons.broken_image, color: Colors.grey),
-            ),
+            decoration: const BoxDecoration(color: Colors.white),
+            child: _isLoadingThumbnail
+                ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
+                : _thumbnailData != null
+                ? Image.memory(
+                    _thumbnailData!,
+                    fit: BoxFit.cover,
+                    width: double.infinity,
+                    height: double.infinity,
+                  )
+                : const Icon(Icons.broken_image, color: Colors.grey),
           ),
           if (widget.isSelectionMode)
             ValueListenableBuilder<Set<String>>(
@@ -835,19 +1409,22 @@ class _PhotoThumbnailState extends State<_PhotoThumbnail> {
                     decoration: BoxDecoration(
                       color: isSelected
                           ? Colors.blue
-                          : Colors.white.withOpacity(0.7),
+                          : Colors.white.withValues(alpha: 0.7),
                       shape: BoxShape.circle,
                       border: Border.all(color: Colors.white, width: 2),
                     ),
                     child: Padding(
-                      padding: const EdgeInsets.all(4.0),
+                      padding: const EdgeInsets.all(AppDimensions.paddingXS),
                       child: isSelected
                           ? const Icon(
                               Icons.check,
                               color: Colors.white,
-                              size: 16,
+                              size: AppDimensions.iconSizeM,
                             )
-                          : const SizedBox(width: 16, height: 16),
+                          : const SizedBox(
+                              width: AppDimensions.iconSizeM,
+                              height: AppDimensions.iconSizeM,
+                            ),
                     ),
                   ),
                 );
@@ -859,20 +1436,39 @@ class _PhotoThumbnailState extends State<_PhotoThumbnail> {
   }
 
   void _showFullImage(BuildContext context) async {
+    // Save current scroll position
+    final state = context.findAncestorStateOfType<_PhotoGalleryScreenState>();
+    if (state != null && state._scrollController.hasClients) {
+      state._savedScrollPosition = state._scrollController.offset;
+    }
+
     final result = await Navigator.push(
       context,
       MaterialPageRoute(
         builder: (context) => _FullImageScreen(asset: widget.asset),
       ),
     );
+
+    // Save scroll position before any async operations
+    final savedPosition = state?._savedScrollPosition ?? 0.0;
+
     // Refresh gallery if photo was deleted or tags were updated
-    final state = context.findAncestorStateOfType<_PhotoGalleryScreenState>();
     if (result == true) {
       await state?._refreshPhotos();
     } else {
       // Refresh tags and filters even if photo wasn't deleted
       await state?._loadAllTags();
       await state?._applyFilters();
+    }
+
+    // Restore scroll position after all operations complete
+    if (state != null && savedPosition > 0) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (state._scrollController.hasClients) {
+          state._scrollController.jumpTo(savedPosition);
+          state._savedScrollPosition = 0.0;
+        }
+      });
     }
   }
 }
@@ -892,6 +1488,9 @@ class _FullImageScreenState extends State<_FullImageScreen> {
   String? _photoKey;
   bool _isLoadingKey = false;
   final TextEditingController _tagController = TextEditingController();
+  final TextEditingController _editTagController = TextEditingController();
+  final TransformationController _transformationController =
+      TransformationController();
 
   @override
   void initState() {
@@ -903,6 +1502,8 @@ class _FullImageScreenState extends State<_FullImageScreen> {
   @override
   void dispose() {
     _tagController.dispose();
+    _editTagController.dispose();
+    _transformationController.dispose();
     super.dispose();
   }
 
@@ -992,13 +1593,18 @@ class _FullImageScreenState extends State<_FullImageScreen> {
     final tag = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Add Tag'),
+        backgroundColor: AppColors.primary,
+        title: const Text(
+          AppStrings.addTag,
+          style: TextStyle(color: AppColors.textWhite),
+        ),
         content: TextField(
           autofocus: true,
           controller: _tagController,
-          decoration: const InputDecoration(
-            hintText: 'Enter tag name',
-            border: OutlineInputBorder(),
+          style: const TextStyle(color: AppColors.textWhite),
+          cursorColor: AppColors.textWhite,
+          decoration: DialogHelpers.buildTextFieldDecoration(
+            hintText: AppStrings.enterTagName,
           ),
           onSubmitted: (value) {
             if (value.trim().isNotEmpty) {
@@ -1007,10 +1613,7 @@ class _FullImageScreenState extends State<_FullImageScreen> {
           },
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
-          ),
+          DialogHelpers.buildCancelButton(context),
           TextButton(
             onPressed: () {
               final tag = _tagController.text.trim();
@@ -1018,7 +1621,8 @@ class _FullImageScreenState extends State<_FullImageScreen> {
                 Navigator.of(context).pop(tag);
               }
             },
-            child: const Text('Add'),
+            style: TextButton.styleFrom(foregroundColor: AppColors.secondary),
+            child: const Text(AppStrings.add),
           ),
         ],
       ),
@@ -1029,30 +1633,181 @@ class _FullImageScreenState extends State<_FullImageScreen> {
     }
   }
 
-  Future<void> _deletePhoto(BuildContext context) async {
-    // Show confirmation dialog
-    final bool? confirm = await showDialog<bool>(
+  Future<void> _showEditTagDialog(String oldTag) async {
+    _editTagController.text = oldTag;
+    final result = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Delete Photo'),
-        content: const Text(
-          'Are you sure you want to delete this photo? This action cannot be undone.',
+        backgroundColor: AppColors.primary,
+        title: const Text(
+          AppStrings.editTag,
+          style: TextStyle(color: AppColors.textWhite),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              autofocus: true,
+              controller: _editTagController,
+              style: const TextStyle(color: AppColors.textWhite),
+              cursorColor: AppColors.textWhite,
+              decoration: DialogHelpers.buildTextFieldDecoration(
+                hintText: AppStrings.enterNewTagName,
+              ),
+              onSubmitted: (value) {
+                if (value.trim().isNotEmpty && value.trim() != oldTag) {
+                  Navigator.of(
+                    context,
+                  ).pop({'action': 'edit', 'tag': value.trim()});
+                }
+              },
+            ),
+            const SizedBox(height: AppDimensions.spacingM),
+            DialogHelpers.buildDeleteTagButton(
+              context,
+              () => Navigator.of(context).pop({'action': 'delete'}),
+            ),
+          ],
         ),
         actions: [
+          DialogHelpers.buildCancelButton(context),
           TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Delete'),
+            onPressed: () {
+              final tag = _editTagController.text.trim();
+              if (tag.isNotEmpty && tag != oldTag) {
+                Navigator.of(context).pop({'action': 'edit', 'tag': tag});
+              }
+            },
+            style: TextButton.styleFrom(foregroundColor: AppColors.secondary),
+            child: const Text(AppStrings.edit),
           ),
         ],
       ),
     );
 
-    if (confirm != true) return;
+    if (result != null) {
+      if (result['action'] == 'delete') {
+        // Delete tag from all photos
+        await TagService.deleteTag(oldTag);
+
+        // Update local state
+        setState(() {
+          _tags.remove(oldTag);
+          _allExistingTags.remove(oldTag);
+        });
+
+        // Notify parent to refresh tags and filters
+        final state = context
+            .findAncestorStateOfType<_PhotoGalleryScreenState>();
+        if (state != null) {
+          await state._loadAllTags();
+          await state._applyFilters();
+        }
+      } else if (result['action'] == 'edit') {
+        final newTag = result['tag'] as String;
+        if (newTag.trim().isNotEmpty && newTag != oldTag) {
+          await TagService.renameTag(oldTag, newTag);
+
+          // Update local state
+          setState(() {
+            if (_tags.contains(oldTag)) {
+              _tags.remove(oldTag);
+              _tags.add(newTag);
+            }
+            if (_allExistingTags.contains(oldTag)) {
+              _allExistingTags.remove(oldTag);
+              _allExistingTags.add(newTag);
+            }
+          });
+
+          // Notify parent to refresh tags and filters
+          final state = context
+              .findAncestorStateOfType<_PhotoGalleryScreenState>();
+          if (state != null) {
+            await state._loadAllTags();
+            await state._applyFilters();
+          }
+        }
+      }
+    }
+    _editTagController.clear();
+  }
+
+  Future<void> _openInSystemPhotos() async {
+    try {
+      // Get the photo file
+      final file = await widget.asset.file;
+      if (file == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                AppStrings.unableToOpenPhoto,
+                style: const TextStyle(color: AppColors.snackbarText),
+              ),
+              backgroundColor: AppColors.snackbarBackground,
+            ),
+          );
+        }
+        return;
+      }
+
+      // Open file using open_file package - opens with default app
+      final result = await OpenFile.open(file.path);
+
+      if (result.type != ResultType.done) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                '${AppStrings.unableToOpenFile}${result.message}',
+                style: const TextStyle(color: AppColors.snackbarText),
+              ),
+              backgroundColor: AppColors.snackbarBackground,
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '${AppStrings.errorOpeningFile}$e',
+              style: const TextStyle(color: AppColors.snackbarText),
+            ),
+            backgroundColor: AppColors.snackbarBackground,
+          ),
+        );
+      }
+      debugPrint('Error opening file: $e');
+    }
+  }
+
+  Future<void> _deletePhoto(BuildContext context) async {
+    // Skip confirmation dialog on iOS since system already prompts
+    if (!Platform.isIOS) {
+      final bool? confirm = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text(AppStrings.deletePhoto),
+          content: const Text(AppStrings.deletePhotoConfirm),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text(AppStrings.cancel),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              child: const Text(AppStrings.delete),
+            ),
+          ],
+        ),
+      );
+
+      if (confirm != true) return;
+    }
 
     try {
       // Delete tags if photo key is available
@@ -1068,8 +1823,11 @@ class _FullImageScreenState extends State<_FullImageScreen> {
       if (deletedIds.isNotEmpty && context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Photo deleted successfully'),
-            backgroundColor: Colors.green,
+            content: Text(
+              AppStrings.photoDeletedSuccessfully,
+              style: const TextStyle(color: AppColors.snackbarText),
+            ),
+            backgroundColor: AppColors.snackbarBackground,
           ),
         );
         // Pop back to gallery and refresh
@@ -1079,8 +1837,11 @@ class _FullImageScreenState extends State<_FullImageScreen> {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Error deleting photo: $e'),
-            backgroundColor: Colors.red,
+            content: Text(
+              '${AppStrings.errorDeletingPhoto}$e',
+              style: const TextStyle(color: AppColors.snackbarText),
+            ),
+            backgroundColor: AppColors.snackbarBackground,
           ),
         );
       }
@@ -1092,20 +1853,20 @@ class _FullImageScreenState extends State<_FullImageScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        backgroundColor: Colors.black,
+        backgroundColor: AppColors.primary,
         iconTheme: const IconThemeData(color: Colors.white),
         actions: [
           IconButton(
-            icon: const Icon(Icons.label_outline),
+            icon: const Icon(Icons.open_in_new),
             color: Colors.white,
-            onPressed: _showAddTagDialog,
-            tooltip: 'Add tag',
+            onPressed: _openInSystemPhotos,
+            tooltip: 'Open in file viewer',
           ),
           IconButton(
             icon: const Icon(Icons.delete_outline),
             color: Colors.white,
             onPressed: () => _deletePhoto(context),
-            tooltip: 'Delete photo',
+            tooltip: AppStrings.tooltipDeletePhoto,
           ),
         ],
       ),
@@ -1118,12 +1879,13 @@ class _FullImageScreenState extends State<_FullImageScreen> {
                 builder: (context, snapshot) {
                   if (snapshot.hasData && snapshot.data != null) {
                     return InteractiveViewer(
+                      transformationController: _transformationController,
                       child: Image.file(snapshot.data!, fit: BoxFit.contain),
                     );
                   }
                   if (snapshot.hasError) {
                     return const Text(
-                      'Error loading image',
+                      AppStrings.errorLoadingImage,
                       style: TextStyle(color: Colors.white),
                     );
                   }
@@ -1133,126 +1895,164 @@ class _FullImageScreenState extends State<_FullImageScreen> {
             ),
           ),
           // Tags section
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.grey[900],
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.3),
-                  blurRadius: 8,
-                  offset: const Offset(0, -2),
-                ),
-              ],
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Existing tags section
-                if (_allExistingTags.isNotEmpty) ...[
-                  const Text(
-                    'All Tags:',
-                    style: TextStyle(
-                      color: Colors.white70,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                    ),
+          SafeArea(
+            top: false,
+            child: Container(
+              width: double.infinity,
+
+              padding: const EdgeInsets.all(AppDimensions.spacingL),
+              decoration: BoxDecoration(
+                color: Colors.grey[900],
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.3),
+                    blurRadius: 8,
+                    offset: const Offset(0, -2),
                   ),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: 6,
-                    children: _allExistingTags.map((tag) {
-                      final isApplied = _tags.contains(tag);
-                      return ActionChip(
-                        label: Text(tag),
-                        backgroundColor: isApplied
-                            ? Colors.blue[700]
-                            : Colors.grey[800],
-                        labelStyle: TextStyle(
-                          color: isApplied ? Colors.white : Colors.white70,
-                          fontWeight: isApplied
-                              ? FontWeight.bold
-                              : FontWeight.normal,
-                        ),
-                        onPressed: () => _toggleTagFromExisting(tag),
-                        avatar: isApplied
-                            ? const Icon(
-                                Icons.check,
-                                size: 16,
-                                color: Colors.white,
-                              )
-                            : null,
-                      );
-                    }).toList(),
-                  ),
-                  const SizedBox(height: 16),
                 ],
-                // Current photo tags section
-                Row(
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Text(
-                      'Photo Tags:',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
+                    // All Tags section - always show
+                    Text(
+                      AppStrings.allTags,
+                      style: AppTypography.withColor(
+                        AppTypography.headingSmall,
+                        AppColors.textWhite70,
                       ),
                     ),
-                    const Spacer(),
-                    IconButton(
-                      icon: const Icon(
-                        Icons.add_circle_outline,
-                        color: Colors.white,
-                      ),
-                      onPressed: _showAddTagDialog,
-                      tooltip: 'Add new tag',
+                    const SizedBox(height: AppDimensions.spacingS),
+                    Wrap(
+                      spacing: AppDimensions.tagSpacing,
+                      runSpacing: AppDimensions.tagSpacing,
+                      children: [
+                        // Existing tags - only show if there are any
+                        ..._allExistingTags.map((tag) {
+                          final isApplied = _tags.contains(tag);
+                          return GestureDetector(
+                            onLongPress: () => _showEditTagDialog(tag),
+                            child: ActionChip(
+                              label: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    Icons.label_outline,
+                                    size: 14,
+                                    color: isApplied
+                                        ? const Color(0xFF191921)
+                                        : const Color(
+                                            0x77acafbf,
+                                          ).withValues(alpha: 1.0),
+                                  ),
+                                  const SizedBox(
+                                    width: AppDimensions.tagIconSpacing,
+                                  ),
+                                  Text(tag),
+                                ],
+                              ),
+                              backgroundColor: isApplied
+                                  ? Colors
+                                        .white // Bootstrap badge: white background
+                                  : Colors
+                                        .transparent, // Outlined style for inactive
+                              side: BorderSide(
+                                color: isApplied
+                                    ? Colors
+                                          .white // No visible border (matches bg)
+                                    : const Color(
+                                        0x77acafbf,
+                                      ), // Outlined border
+                                width: isApplied ? 0 : 1,
+                              ),
+                              elevation: 0,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(
+                                  AppDimensions.tagBorderRadius,
+                                ),
+                              ),
+                              labelStyle: TextStyle(
+                                color: isApplied
+                                    ? const Color(
+                                        0xFF191921,
+                                      ) // Primary color (dark) - fully opaque
+                                    : const Color(0x77acafbf).withValues(
+                                        alpha: 1.0,
+                                      ), // Match border color for inactive
+                                fontWeight: FontWeight
+                                    .w500, // Bootstrap badge: medium weight
+                                fontSize: AppTypography.fontSizeS,
+                              ),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 4,
+                              ),
+                              visualDensity: VisualDensity.compact,
+                              onPressed: () => _toggleTagFromExisting(tag),
+                            ),
+                          );
+                        }),
+                        // Add tag button - always show
+                        ActionChip(
+                          label: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.add,
+                                size: 14,
+                                color: const Color(
+                                  0xffacafbf,
+                                ).withValues(alpha: 0.5),
+                              ),
+                              const SizedBox(
+                                width: AppDimensions.tagIconSpacing,
+                              ),
+                              const Text(AppStrings.addTag),
+                            ],
+                          ),
+                          backgroundColor: Colors.transparent,
+                          side: BorderSide.none,
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(
+                              AppDimensions.tagBorderRadius,
+                            ),
+                          ),
+                          labelStyle: TextStyle(
+                            color: const Color(
+                              0xffacafbf,
+                            ).withValues(alpha: 0.5),
+                            fontWeight: AppTypography.fontWeightMedium,
+                            fontSize: AppTypography.fontSizeS,
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          visualDensity: VisualDensity.compact,
+                          onPressed: _showAddTagDialog,
+                        ),
+                      ],
                     ),
+                    if (_isLoadingKey)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 16),
+                        child: Center(
+                          child: SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ),
+                      ),
                   ],
                 ),
-                const SizedBox(height: 8),
-                if (_isLoadingKey)
-                  const Padding(
-                    padding: EdgeInsets.all(8.0),
-                    child: Center(
-                      child: SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      ),
-                    ),
-                  )
-                else if (_tags.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.all(8.0),
-                    child: Text(
-                      'No tags applied',
-                      style: TextStyle(color: Colors.grey),
-                    ),
-                  )
-                else
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: _tags.map((tag) {
-                      return Chip(
-                        label: Text(tag),
-                        backgroundColor: Colors.blue[700],
-                        labelStyle: const TextStyle(color: Colors.white),
-                        deleteIcon: const Icon(
-                          Icons.close,
-                          size: 18,
-                          color: Colors.white,
-                        ),
-                        onDeleted: () => _removeTag(tag),
-                      );
-                    }).toList(),
-                  ),
-              ],
+              ),
             ),
           ),
         ],

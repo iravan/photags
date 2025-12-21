@@ -1,4 +1,4 @@
-name: phoorg
+name: photag
 description: "A new Flutter project."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
@@ -37,6 +37,11 @@ dependencies:
   photo_manager: ^3.5.0
   crypto: ^3.0.5
   shared_preferences: ^2.3.2
+  open_file: ^3.5.2
+  dotted_border: ^3.1.0
+  yaml: ^3.1.2
+  file_picker: ^8.1.4
+  path_provider: ^2.1.5
 
 dev_dependencies:
   flutter_test:
@@ -48,6 +53,16 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.1
+
+# App icon configuration - generates all icon sizes automatically
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon/app_icon.png"
+  min_sdk_android: 21
+  adaptive_icon_background: "#191921"
+  # adaptive_icon_foreground will use image_path if not specified
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -61,9 +76,8 @@ flutter:
   uses-material-design: true
 
   # To add assets to your application, add an assets section, like this:
-  # assets:
-  #   - images/a_dot_burr.jpeg
-  #   - images/a_dot_ham.jpeg
+  assets:
+    - assets/icon/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

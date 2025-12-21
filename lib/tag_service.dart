@@ -1,6 +1,8 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:yaml/yaml.dart' as yaml;
 
 class TagService {
   static const String _tagsKey = 'photo_tags';
@@ -209,6 +211,84 @@ class TagService {
     return tagIndex.keys.toSet();
   }
 
+  /// Rename a tag across all photos
+  static Future<void> renameTag(String oldTag, String newTag) async {
+    if (oldTag == newTag || newTag.trim().isEmpty) {
+      return;
+    }
+
+    final allTags = await getAllTags();
+    final tagIndex = await getTagIndex();
+
+    // Get all photos that have the old tag
+    final photosWithOldTag = tagIndex[oldTag] ?? [];
+
+    // Update each photo's tags
+    for (final photoKey in photosWithOldTag) {
+      final tags = allTags[photoKey];
+      if (tags != null && tags.contains(oldTag)) {
+        // Replace old tag with new tag
+        final index = tags.indexOf(oldTag);
+        tags[index] = newTag;
+        allTags[photoKey] = tags;
+      }
+    }
+
+    // Update tag index
+    if (photosWithOldTag.isNotEmpty) {
+      // Remove old tag from index
+      tagIndex.remove(oldTag);
+
+      // Add new tag to index with all photos
+      final photosWithNewTag = tagIndex[newTag] ?? [];
+      for (final photoKey in photosWithOldTag) {
+        if (!photosWithNewTag.contains(photoKey)) {
+          photosWithNewTag.add(photoKey);
+        }
+      }
+      tagIndex[newTag] = photosWithNewTag;
+    }
+
+    await _saveTags(allTags);
+    await _saveTagIndex(tagIndex);
+
+    debugPrint(
+      'TagService: Renamed tag "$oldTag" to "$newTag" across ${photosWithOldTag.length} photos',
+    );
+  }
+
+  /// Delete a tag from all photos
+  static Future<void> deleteTag(String tag) async {
+    final allTags = await getAllTags();
+    final tagIndex = await getTagIndex();
+
+    // Get all photos that have this tag
+    final photosWithTag = tagIndex[tag] ?? [];
+
+    // Remove tag from each photo
+    for (final photoKey in photosWithTag) {
+      final tags = allTags[photoKey];
+      if (tags != null && tags.contains(tag)) {
+        tags.remove(tag);
+        if (tags.isEmpty) {
+          allTags.remove(photoKey);
+        } else {
+          allTags[photoKey] = tags;
+        }
+      }
+    }
+
+    // Remove tag from index
+    tagIndex.remove(tag);
+
+    await _saveTags(allTags);
+    await _saveTagIndex(tagIndex);
+
+    debugPrint(
+      'TagService: Deleted tag "$tag" from ${photosWithTag.length} photos',
+    );
+  }
+
   /// Rebuild the reverse index from the main tags data (for migration/repair)
   static Future<void> rebuildTagIndex() async {
     final allTags = await getAllTags();
@@ -229,5 +309,127 @@ class TagService {
     }
 
     await _saveTagIndex(tagIndex);
+  }
+
+  /// Export tags data to YAML string
+  static Future<String> exportTagsToYamlString() async {
+    final allTags = await getAllTags();
+    final tagIndex = await getTagIndex();
+
+    final exportData = <String, dynamic>{
+      'photo_tags': allTags,
+      'tag_index': tagIndex,
+    };
+
+    // Convert to YAML string
+    return _mapToYaml(exportData);
+  }
+
+  /// Import tags data from YAML file
+  static Future<void> importTagsFromYaml(String filePath) async {
+    try {
+      final file = File(filePath);
+      if (!await file.exists()) {
+        throw Exception('File does not exist: $filePath');
+      }
+
+      final yamlString = await file.readAsString();
+      final yamlDoc = yaml.loadYaml(yamlString);
+
+      if (yamlDoc is! Map) {
+        throw Exception('Invalid YAML format: expected a map');
+      }
+
+      final Map<String, dynamic> data = Map<String, dynamic>.from(yamlDoc);
+
+      // Extract photo_tags and tag_index
+      final photoTags = data['photo_tags'];
+      final tagIndex = data['tag_index'];
+
+      if (photoTags == null || tagIndex == null) {
+        throw Exception('Invalid YAML format: missing photo_tags or tag_index');
+      }
+
+      // Convert to proper types
+      final Map<String, List<String>> allTags = Map<String, List<String>>.from(
+        Map<String, dynamic>.from(photoTags).map(
+          (key, value) =>
+              MapEntry(key.toString(), List<String>.from(value as List)),
+        ),
+      );
+
+      final Map<String, List<String>> index = Map<String, List<String>>.from(
+        Map<String, dynamic>.from(tagIndex).map(
+          (key, value) =>
+              MapEntry(key.toString(), List<String>.from(value as List)),
+        ),
+      );
+
+      // Save imported data
+      await _saveTags(allTags);
+      await _saveTagIndex(index);
+
+      debugPrint(
+        'TagService: Imported ${allTags.length} photo tags and ${index.length} tag index entries',
+      );
+    } catch (e) {
+      debugPrint('TagService: Error importing tags: $e');
+      rethrow;
+    }
+  }
+
+  /// Convert Map to YAML string
+  static String _mapToYaml(Map<String, dynamic> map) {
+    final buffer = StringBuffer();
+    buffer.writeln('# PhoTag Tags Export');
+    buffer.writeln('# Generated: ${DateTime.now().toIso8601String()}');
+    buffer.writeln('');
+
+    // Write photo_tags
+    final photoTags = map['photo_tags'] as Map<String, List<String>>;
+    if (photoTags.isNotEmpty) {
+      buffer.writeln('photo_tags:');
+      for (final entry in photoTags.entries) {
+        // Escape special characters in key
+        final key = _escapeYamlString(entry.key);
+        buffer.writeln('  "$key":');
+        for (final tag in entry.value) {
+          final escapedTag = _escapeYamlString(tag);
+          buffer.writeln('    - "$escapedTag"');
+        }
+      }
+    } else {
+      buffer.writeln('photo_tags: {}');
+    }
+
+    buffer.writeln('');
+
+    // Write tag_index
+    final tagIndex = map['tag_index'] as Map<String, List<String>>;
+    if (tagIndex.isNotEmpty) {
+      buffer.writeln('tag_index:');
+      for (final entry in tagIndex.entries) {
+        // Escape special characters in key
+        final key = _escapeYamlString(entry.key);
+        buffer.writeln('  "$key":');
+        for (final photoKey in entry.value) {
+          final escapedKey = _escapeYamlString(photoKey);
+          buffer.writeln('    - "$escapedKey"');
+        }
+      }
+    } else {
+      buffer.writeln('tag_index: {}');
+    }
+
+    return buffer.toString();
+  }
+
+  /// Escape special characters in YAML strings
+  static String _escapeYamlString(String str) {
+    return str
+        .replaceAll('\\', '\\\\')
+        .replaceAll('"', '\\"')
+        .replaceAll('\n', '\\n')
+        .replaceAll('\r', '\\r');
   }
 }

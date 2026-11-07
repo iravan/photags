@@ -1,6 +1,6 @@
 class AppStrings {
   // App info
-  static const String appTitle = 'PhoTag - Photo Gallery';
+  static const String appTitle = 'PhoTags - Photo Gallery';
 
   // Permission messages
   static const String permissionDenied =
@@ -61,7 +61,7 @@ class AppStrings {
 
   // Help
   static const String help = 'Help';
-  static const String helpTitle = 'How to Use PhoTag';
+  static const String helpTitle = 'How to Use PhoTags';
 
   // Export/Import
   static const String exportTags = 'Export Tags';

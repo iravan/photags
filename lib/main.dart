@@ -465,7 +465,7 @@ class _PhotoGalleryScreenState extends State<PhotoGalleryScreen> {
           .toIso8601String()
           .replaceAll(':', '-')
           .split('.')[0];
-      final defaultFileName = 'photag_tags_$timestamp.yaml';
+      final defaultFileName = 'photags_tags_$timestamp.yaml';
 
       // Convert string to bytes for Android/iOS
       final bytes = utf8.encode(yamlContent);

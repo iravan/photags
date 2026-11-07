@@ -381,7 +381,7 @@ class TagService {
   /// Convert Map to YAML string
   static String _mapToYaml(Map<String, dynamic> map) {
     final buffer = StringBuffer();
-    buffer.writeln('# PhoTag Tags Export');
+    buffer.writeln('# PhoTags Tags Export');
     buffer.writeln('# Generated: ${DateTime.now().toIso8601String()}');
     buffer.writeln('');
 

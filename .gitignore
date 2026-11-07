@@ -46,3 +46,6 @@ app.*.map.json
 
 linux/
 windows/
+
+# graphify knowledge graph (generated)
+graphify-out/
